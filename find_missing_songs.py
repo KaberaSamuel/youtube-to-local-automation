@@ -1,23 +1,21 @@
-# a script to find the missing songs with a more forgiving algorithm, forexample:  "Song Title (Live Version)" and "Song Title (Remix)" Should match! This increases the chances of matches but the precision is lower
-
 import subprocess
 import json
 import os
 import re
 
 
-def get_youtube_playlist_info(playlist_url):
+def get_youtube_playlist_titles(playlist_url):
     """
-    Fetches titles for videos in a YouTube playlist using yt-dlp.
+    Fetches raw titles for videos in a YouTube playlist using yt-dlp.
 
     Args:
         playlist_url (str): The URL of the YouTube playlist.
 
     Returns:
-        list: A list of original YouTube titles.
+        list: A list of original YouTube titles (strings).
               Returns an empty list if there's an error or no videos found.
     """
-    print(f"Fetching playlist information from: {playlist_url}")
+    print(f"Fetching YouTube playlist titles from: {playlist_url}")
     try:
         command = ["yt-dlp", "--flat-playlist", "--print-json", playlist_url]
         process = subprocess.run(
@@ -36,7 +34,7 @@ def get_youtube_playlist_info(playlist_url):
                     print(
                         f"Warning: Could not decode JSON line from yt-dlp: {line[:100]}..."
                     )
-        print(f"Successfully fetched information for {len(youtube_titles)} videos.")
+        print(f"Successfully fetched {len(youtube_titles)} YouTube titles.")
         return youtube_titles
     except subprocess.CalledProcessError as e:
         print(f"Error calling yt-dlp: {e}")
@@ -54,44 +52,55 @@ def get_youtube_playlist_info(playlist_url):
         return []
 
 
-def normalize_text_for_comparison(text):
+def clean_title_for_comparison(title_string):
     """
-    Normalizes a string for robust comparison by:
-    - Lowercasing
-    - Removing common suffixes like (Official Video), (MP3_160K), etc.
-    - Removing common punctuation and extra spaces.
+    Cleans and normalizes a song title (from YouTube or local filename) for robust comparison.
+    This function aims to extract the core artist and song title, stripping away
+    suffixes, bitrate info, and standardizing special characters.
     """
-    normalized = text.lower()
+    cleaned = title_string.lower()
 
-    # Remove common YouTube/Snaptube suffixes and bitrate info
-    normalized = re.sub(
-        r"\s*(\(|\[)(official\s+)?(audio|video|lyrics?|visualizer|music\s+video|hd|hq|from\s+f1\s*®\s*the\s+movie|mp3_\d+k|m4a_\d+k|mp4_\d+k)(\)|\])\s*",
-        "",
-        normalized,
+    # 1. Remove common file extensions (if present, from local filenames)
+    cleaned = re.sub(r"\.(mp3|m4a|opus)$", "", cleaned, flags=re.IGNORECASE)
+
+    # 2. Remove common bitrate suffixes (from local filenames)
+    cleaned = re.sub(r"\s*\(mp3_\d+k\)\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\(m4a_\d+k\)\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\(mp4_\d+k\)\s*", "", cleaned, flags=re.IGNORECASE)
+
+    # 3. Remove common YouTube/Snaptube descriptive suffixes (from both)
+    # This regex targets common phrases often in parentheses or brackets.
+    cleaned = re.sub(
+        r"\s*(\(|\[)(official\s+)?(audio|video|lyrics?|visualizer|music\s+video|hd|hq|from\s+f1\s*®\s*the\s+movie)(\)|\])\s*",
+        " ",  # Replace with space to separate words
+        cleaned,
         flags=re.IGNORECASE | re.UNICODE,
     )
 
-    # Remove common punctuation and replace with space, then reduce multiple spaces
-    normalized = re.sub(r'[.,!?;:\'"“”‘’`~@#$%^&*()_+={}\[\]\\|<>/]', " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized)
+    # 4. Replace non-alphanumeric characters (excluding spaces and hyphens) with a space.
+    # This handles all forms of punctuation and Musicolet's `_` replacements.
+    cleaned = re.sub(r"[^a-z0-9\s-]", " ", cleaned)
 
-    # Remove leading/trailing spaces and hyphens
-    normalized = normalized.strip(" -")
+    # 5. Collapse multiple spaces/hyphens into a single space.
+    cleaned = re.sub(r"[\s-]+", " ", cleaned)
 
-    return normalized
+    # 6. Trim leading/trailing spaces.
+    cleaned = cleaned.strip()
+
+    return cleaned
 
 
-def parse_musicolet_m3u_for_filenames(m3u_file_path):
+def parse_musicolet_m3u_to_cleaned_titles(m3u_file_path):
     """
-    Parses a Musicolet-exported M3U file to extract and normalize filenames.
+    Parses a Musicolet-exported M3U file to extract and clean song titles from filenames.
 
     Args:
         m3u_file_path (str): Path to the Musicolet-exported M3U file.
 
     Returns:
-        set: A set of normalized filenames found in the local library.
+        set: A set of cleaned and normalized song titles from the local library.
     """
-    local_filenames_normalized = set()
+    local_cleaned_titles = set()
     print(f"Parsing local library M3U file: {m3u_file_path}")
     try:
         with open(m3u_file_path, "r", encoding="utf-8") as f:
@@ -101,17 +110,16 @@ def parse_musicolet_m3u_for_filenames(m3u_file_path):
                     continue  # Skip empty lines and EXTINF/comment lines
 
                 # Extract filename from the path
-                # Example path: snaptube/download/SnapTube Audio/Lil Yachty - Won_t Diss You(MP3_160K).mp3
                 filename_with_ext = os.path.basename(line)
 
-                # Normalize the filename for comparison
-                normalized_filename = normalize_text_for_comparison(filename_with_ext)
-                if normalized_filename:
-                    local_filenames_normalized.add(normalized_filename)
+                # Clean and normalize the filename for comparison
+                cleaned_title = clean_title_for_comparison(filename_with_ext)
+                if cleaned_title:
+                    local_cleaned_titles.add(cleaned_title)
         print(
-            f"Extracted and normalized {len(local_filenames_normalized)} unique local filenames."
+            f"Extracted and cleaned {len(local_cleaned_titles)} unique local song titles."
         )
-        return local_filenames_normalized
+        return local_cleaned_titles
     except FileNotFoundError:
         print(
             f"Error: Musicolet M3U file not found at '{m3u_file_path}'. Please check the path."
@@ -123,7 +131,9 @@ def parse_musicolet_m3u_for_filenames(m3u_file_path):
 
 
 if __name__ == "__main__":
-    print("--- YouTube Playlist vs. Local Library (Missing Songs Checker) ---")
+    print(
+        "--- YouTube Playlist vs. Local Library (Simplified Missing Songs Checker) ---"
+    )
     print(
         "This script will identify songs from your YouTube playlist that are NOT in your local library."
     )
@@ -144,69 +154,58 @@ if __name__ == "__main__":
         exit()
 
     # Get YouTube playlist titles
-    youtube_titles = get_youtube_playlist_info(youtube_playlist_url)
-    if not youtube_titles:
+    youtube_titles_raw = get_youtube_playlist_titles(youtube_playlist_url)
+    if not youtube_titles_raw:
         print("No YouTube videos found or error occurred. Cannot proceed.")
         exit()
 
-    # Get local filenames from Musicolet's M3U
-    local_library_normalized_filenames = parse_musicolet_m3u_for_filenames(
+    # Clean and normalize YouTube titles for comparison
+    youtube_cleaned_titles = {
+        clean_title_for_comparison(title) for title in youtube_titles_raw
+    }
+
+    # Get local cleaned titles from Musicolet's M3U
+    local_library_cleaned_titles = parse_musicolet_m3u_to_cleaned_titles(
         musicolet_m3u_path
     )
-    if not local_library_normalized_filenames:
+    if not local_library_cleaned_titles:
         print(
             "No local songs found in the provided M3U file or error occurred. Cannot proceed."
         )
         exit()
 
     # Compare and find missing songs
-    missing_songs = []
+    missing_songs_raw = []
     matched_count = 0
 
     print("\nComparing YouTube playlist with local library...")
-    for yt_title in youtube_titles:
-        normalized_yt_title = normalize_text_for_comparison(yt_title)
+    for i, yt_title_raw in enumerate(youtube_titles_raw):
+        cleaned_yt_title = clean_title_for_comparison(yt_title_raw)
 
-        # Check for a match
-        if normalized_yt_title in local_library_normalized_filenames:
+        if cleaned_yt_title in local_library_cleaned_titles:
             matched_count += 1
         else:
-            # Try a slightly more lenient check for very short titles or common words
-            found_lenient = False
-            yt_words = set(normalized_yt_title.split())
-            if yt_words:  # Only proceed if there are words to compare
-                for local_norm_filename in local_library_normalized_filenames:
-                    local_words = set(local_norm_filename.split())
-                    if (
-                        local_words
-                        and len(yt_words.intersection(local_words)) / len(yt_words)
-                        >= 0.7
-                    ):  # 70% word overlap
-                        found_lenient = True
-                        break
-
-            if not found_lenient:
-                missing_songs.append(yt_title)
+            missing_songs_raw.append(yt_title_raw)  # Append the original YouTube title
 
     print(f"\n--- Comparison Complete ---")
-    print(f"Total YouTube songs: {len(youtube_titles)}")
+    print(f"Total YouTube songs: {len(youtube_titles_raw)}")
     print(f"Songs found in local library: {matched_count}")
-    print(f"Songs potentially missing from local library: {len(missing_songs)}")
+    print(f"Songs potentially missing from local library: {len(missing_songs_raw)}")
 
-    if missing_songs:
+    if missing_songs_raw:
         print("\n--- Missing Songs List ---")
-        for i, song in enumerate(missing_songs):
+        for i, song in enumerate(missing_songs_raw):
             print(f"{i+1}. {song}")
 
         output_missing_file = "missing_youtube_songs.txt"
         try:
             with open(output_missing_file, "w", encoding="utf-8") as f:
-                for song in missing_songs:
+                for song in missing_songs_raw:
                     f.write(song + "\n")
             print(f"\nList of missing songs saved to '{output_missing_file}'")
         except IOError as e:
             print(f"Error saving missing songs list: {e}")
     else:
         print(
-            "\nGreat! All songs from your YouTube playlist appear to be in your local library."
+            "\nGreat! All songs from your YouTube playlist appear to be in your local library (based on cleaned titles)."
         )
