@@ -1,241 +1,173 @@
-#!/usr/bin/env python3
-"""
-YouTube Playlist to M3U Converter with Automatic File Matching
-Usage: python youtube_to_m3u.py <playlist_url> <music_directory> [output_file]
-"""
-
-import sys
 import subprocess
 import json
-import re
 import os
-from pathlib import Path
-from difflib import SequenceMatcher
-import unicodedata
+import re
 
 
-def normalize_text(text):
-    """Normalize text for better matching"""
-    # Remove accents and convert to lowercase
-    text = unicodedata.normalize("NFKD", text.lower())
-    text = "".join(c for c in text if not unicodedata.combining(c))
+def get_youtube_playlist_info(playlist_url):
+    """
+    Fetches titles and durations for videos in a YouTube playlist using yt-dlp.
 
-    # Remove common words and characters that might differ
-    text = re.sub(r"\b(official|video|audio|hd|hq|lyrics|lyric|music|song)\b", "", text)
-    text = re.sub(r"[^\w\s]", " ", text)  # Replace punctuation with spaces
-    text = re.sub(r"\s+", " ", text)  # Multiple spaces to single space
-    text = text.strip()
+    Args:
+        playlist_url (str): The URL of the YouTube playlist.
 
-    return text
-
-
-def similarity(a, b):
-    """Calculate similarity between two strings"""
-    return SequenceMatcher(None, normalize_text(a), normalize_text(b)).ratio()
-
-
-def get_playlist_info(playlist_url):
-    """Extract playlist information using yt-dlp"""
-    print("Extracting playlist information from YouTube...")
-    cmd = ["yt-dlp", "--flat-playlist", "--dump-json", playlist_url]
-
+    Returns:
+        list: A list of dictionaries, each containing 'title' and 'duration' (in seconds).
+              Returns an empty list if there's an error or no videos found.
+    """
+    print(f"Fetching playlist information from: {playlist_url}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return [json.loads(line) for line in result.stdout.strip().split("\n") if line]
+        # Use --flat-playlist to get only video info without downloading
+        # --print-json outputs each video's info as a JSON line
+        command = ["yt-dlp", "--flat-playlist", "--print-json", playlist_url]
+        process = subprocess.run(
+            command, capture_output=True, text=True, check=True, encoding="utf-8"
+        )
+
+        # yt-dlp prints each entry as a separate JSON object per line
+        videos_info = []
+        for line in process.stdout.strip().split("\n"):
+            if line:
+                try:
+                    video_data = json.loads(line)
+                    title = video_data.get("title")
+                    duration = video_data.get("duration")  # duration in seconds
+                    if title and duration is not None:
+                        videos_info.append({"title": title, "duration": int(duration)})
+                except json.JSONDecodeError:
+                    print(
+                        f"Warning: Could not decode JSON line: {line[:100]}..."
+                    )  # Print first 100 chars
+        print(f"Successfully fetched information for {len(videos_info)} videos.")
+        return videos_info
     except subprocess.CalledProcessError as e:
-        print(f"Error running yt-dlp: {e}")
-        return None
-
-
-def scan_music_files(music_directory):
-    """Scan the music directory for audio files"""
-    print(f"Scanning music files in: {music_directory}")
-
-    audio_extensions = {".mp3", ".m4a", ".flac", ".ogg", ".wav", ".aac", ".wma"}
-    music_files = []
-
-    if not os.path.exists(music_directory):
-        print(f"Error: Music directory not found: {music_directory}")
+        print(f"Error calling yt-dlp: {e}")
+        print(f"Stderr: {e.stderr}")
+        print("Please ensure yt-dlp is installed and in your system's PATH.")
+        print("You can install it using pip: pip install yt-dlp")
+        return []
+    except FileNotFoundError:
+        print("Error: 'yt-dlp' command not found.")
+        print("Please ensure yt-dlp is installed and in your system's PATH.")
+        print("You can install it using pip: pip install yt-dlp")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
         return []
 
-    for root, dirs, files in os.walk(music_directory):
-        for file in files:
-            if Path(file).suffix.lower() in audio_extensions:
-                full_path = os.path.join(root, file)
-                music_files.append(full_path)
 
-    print(f"Found {len(music_files)} audio files")
-    return music_files
+def sanitize_filename(title):
+    """
+    Sanitizes a string to be suitable for a filename, removing invalid characters.
+    Also handles the leading underscore for some files.
+    """
+    # Replace common invalid characters with an underscore or remove them
+    sanitized = re.sub(r'[\\/:*?"<>|]', "_", title)
+    # Remove leading/trailing spaces
+    sanitized = sanitized.strip()
+    # Handle the leading underscore if present in the original title
+    if title.startswith("_") and not sanitized.startswith("_"):
+        sanitized = "_" + sanitized
+    return sanitized
 
 
-def match_songs(playlist_info, music_files, threshold=0.6):
-    """Match YouTube playlist songs with local music files"""
-    print("Matching YouTube songs with local files...")
+def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
+    """
+    Generates an M3U playlist file based on YouTube video information.
+    It creates multiple candidate paths for each song to help Musicolet find the file.
 
-    matched_songs = []
-    unmatched_songs = []
+    Args:
+        playlist_info (list): A list of dictionaries with 'title' and 'duration'.
+        output_file (str): The name of the M3U file to create.
+    """
+    # Base path on your Android phone where Musicolet will look for files
+    BASE_ANDROID_PATH = "/storage/emulated/0/snaptube/download/SnapTube Audio/"
 
-    for i, item in enumerate(playlist_info):
-        title = item.get("title", "Unknown")
-        uploader = item.get("uploader", "Unknown Artist")
-        duration = item.get("duration", 0)
+    m3u_content = ["#EXTM3U"]
 
-        print(f"Processing {i+1}/{len(playlist_info)}: {title}")
+    print(f"\nGenerating M3U file: {output_file}")
+    print("Musicolet will try to match these paths on your phone.")
 
-        best_match = None
-        best_score = 0
+    for video in playlist_info:
+        yt_title = video["title"]
+        duration = video["duration"]  # Duration in seconds
 
-        # Try to match with each music file
-        for music_file in music_files:
-            filename = os.path.basename(music_file)
-            filename_no_ext = os.path.splitext(filename)[0]
+        # Sanitize the title to create a potential filename
+        sanitized_yt_title = sanitize_filename(yt_title)
 
-            # Calculate similarity scores
-            title_score = similarity(title, filename_no_ext)
-            full_score = similarity(f"{uploader} {title}", filename_no_ext)
+        # Generate multiple candidate paths for Musicolet to try
+        # This covers the various naming conventions from Snaptube
+        candidate_filenames = [
+            f"{sanitized_yt_title}(MP3_160K).mp3",  # Example: Imagine Dragons - Follow You (Lyric Video)(MP3_160K).mp3
+            f"{sanitized_yt_title}.mp3",  # Example: Song Title.mp3 (if no bitrate suffix)
+            f"{sanitized_yt_title}(MP4_128K).m4a",  # Example: Song Title(MP4_128K).m4a
+            f"{sanitized_yt_title}.m4a",  # Example: Post Malone - Chemical (Official Lyric Video).m4a
+        ]
 
-            # Use the better score
-            score = max(title_score, full_score)
+        # Add the EXTINF line once for the YouTube title
+        m3u_content.append(f"#EXTINF:{duration},{yt_title}")
 
-            if score > best_score:
-                best_score = score
-                best_match = music_file
-
-        if best_match and best_score >= threshold:
-            matched_songs.append(
-                {
-                    "title": title,
-                    "uploader": uploader,
-                    "duration": duration,
-                    "file_path": best_match,
-                    "match_score": best_score,
-                }
+        # Add all candidate paths for this song
+        for filename in candidate_filenames:
+            # Ensure forward slashes for Android paths
+            full_android_path = os.path.join(BASE_ANDROID_PATH, filename).replace(
+                "\\", "/"
             )
-            print(
-                f"  ✓ Matched with: {os.path.basename(best_match)} (score: {best_score:.2f})"
-            )
-        else:
-            unmatched_songs.append(
-                {
-                    "title": title,
-                    "uploader": uploader,
-                    "duration": duration,
-                    "best_match": best_match,
-                    "best_score": best_score,
-                }
-            )
-            print(f"  ✗ No good match found (best score: {best_score:.2f})")
+            m3u_content.append(full_android_path)
 
-    return matched_songs, unmatched_songs
+        # Add an empty line for better readability in the M3U file (optional)
+        m3u_content.append("")
 
-
-def create_m3u_file(matched_songs, output_file):
-    """Create M3U file from matched songs"""
-    print(f"Creating M3U file: {output_file}")
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("#EXTM3U\n")
-
-        for song in matched_songs:
-            title = song["title"]
-            uploader = song["uploader"]
-            duration = song["duration"]
-            file_path = song["file_path"]
-
-            # Write M3U entry
-            f.write(f"#EXTINF:{duration},{uploader} - {title}\n")
-            f.write(f"{file_path}\n")
-
-    print(f"M3U file created successfully!")
-
-
-def save_unmatched_report(unmatched_songs, output_file):
-    """Save a report of unmatched songs"""
-    if not unmatched_songs:
-        return
-
-    report_file = output_file.replace(".m3u", "_unmatched.txt")
-
-    with open(report_file, "w", encoding="utf-8") as f:
-        f.write("UNMATCHED SONGS REPORT\n")
-        f.write("=" * 50 + "\n\n")
-
-        for song in unmatched_songs:
-            f.write(f"Title: {song['title']}\n")
-            f.write(f"Uploader: {song['uploader']}\n")
-            f.write(f"Best match score: {song['best_score']:.2f}\n")
-            if song["best_match"]:
-                f.write(f"Best match file: {os.path.basename(song['best_match'])}\n")
-            f.write("-" * 30 + "\n")
-
-    print(f"Unmatched songs report saved: {report_file}")
-
-
-def create_m3u_simple(playlist_info, output_file, android_music_path):
-    """Create M3U file with Android paths (for phone files)"""
-    print(f"Creating M3U file: {output_file}")
-
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("#EXTM3U\n")
-
-        for item in playlist_info:
-            title = item.get("title", "Unknown")
-            uploader = item.get("uploader", "Unknown Artist")
-            duration = item.get("duration", 0)
-
-            # Clean title for filename
-            clean_title = re.sub(r'[<>:"/\\|?*]', "", title)
-
-            # Write M3U entry
-            f.write(f"#EXTINF:{duration},{uploader} - {title}\n")
-
-            # Try common extensions
-            for ext in [".mp3", ".m4a", ".aac", ".flac", ".ogg"]:
-                file_path = f"{android_music_path}/{clean_title}{ext}"
-                f.write(f"{file_path}\n")
-                break  # Only add one entry per song
-
-    print(f"M3U file created successfully with {len(playlist_info)} songs!")
-
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python youtube_to_m3u.py <playlist_url> [output_file]")
+    try:
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(m3u_content))
         print(
-            "Example: python youtube_to_m3u.py 'https://www.youtube.com/playlist?list=PLxxxxx' 'my_playlist.m3u'"
+            f"Successfully created '{output_file}' with {len(playlist_info)} entries."
         )
-        sys.exit(1)
-
-    playlist_url = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "playlist.m3u"
-
-    # Android path for Snaptube Audio folder
-    android_music_path = "/storage/emulated/0/snaptube/download/Snaptube Audio"
-
-    print("Extracting playlist information from YouTube...")
-    playlist_info = get_playlist_info(playlist_url)
-
-    if not playlist_info:
-        print("Failed to extract playlist information")
-        sys.exit(1)
-
-    print(f"Found {len(playlist_info)} songs in playlist")
-
-    # Create M3U file with Android paths
-    create_m3u_simple(playlist_info, output_file, android_music_path)
-
-    print(f"\n" + "=" * 50)
-    print("SUCCESS!")
-    print(f"M3U file created: {output_file}")
-    print(f"Songs in playlist: {len(playlist_info)}")
-    print(f"Configured for Android path: {android_music_path}")
-    print("\nNext steps:")
-    print("1. Transfer the M3U file to your phone")
-    print("2. Import it into Musicolet")
-    print(
-        "3. Musicolet will automatically find matching songs in your Snaptube Audio folder"
-    )
+        print(
+            "Each song has multiple candidate paths to increase Musicolet's matching success."
+        )
+    except IOError as e:
+        print(f"Error writing M3U file: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    print("--- YouTube Playlist to Musicolet M3U Generator ---")
+    print("Make sure you have 'yt-dlp' installed on your system.")
+    print("If not, install it via pip: pip install yt-dlp")
+    print(
+        "Or download the executable from: [https://github.com/yt-dlp/yt-dlp/releases](https://github.com/yt-dlp/yt-dlp/releases)"
+    )
+
+    youtube_playlist_url = input(
+        "\nEnter the full URL of your YouTube playlist: "
+    ).strip()
+    if not youtube_playlist_url:
+        print("No URL provided. Exiting.")
+    else:
+        output_m3u_filename = input(
+            "Enter desired M3U output filename (e.g., chill_music.m3u, default: chill_playlist.m3u): "
+        ).strip()
+        if not output_m3u_filename:
+            output_m3u_filename = "chill_playlist.m3u"
+
+        playlist_data = get_youtube_playlist_info(youtube_playlist_url)
+        if playlist_data:
+            generate_m3u_playlist(playlist_data, output_m3u_filename)
+            print("\n--- M3U Generation Complete ---")
+            print(f"1. Transfer '{output_m3u_filename}' to your Android phone.")
+            print(
+                f"   A good location is inside '/storage/emulated/0/snaptube/download/SnapTube Audio/' or your phone's 'Playlists' folder."
+            )
+            print("2. Open Musicolet app on your phone.")
+            print("3. Go to 'Playlists' section.")
+            print(
+                "4. Look for an 'Import playlist' or '+' icon and select the transferred M3U file."
+            )
+            print(
+                "Musicolet will now scan your local files based on the paths in the M3U and create your playlist."
+            )
+        else:
+            print(
+                "\nCould not retrieve playlist information. M3U file was not generated."
+            )
