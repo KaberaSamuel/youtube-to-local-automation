@@ -17,8 +17,6 @@ def get_youtube_playlist_info(playlist_url):
     """
     print(f"Fetching playlist information from: {playlist_url}")
     try:
-        # Use --flat-playlist to get only video info without downloading
-        # --print-json outputs each video's info as a JSON line
         command = ["yt-dlp", "--flat-playlist", "--print-json", playlist_url]
         process = subprocess.run(
             command, capture_output=True, text=True, check=True, encoding="utf-8"
@@ -55,15 +53,18 @@ def get_youtube_playlist_info(playlist_url):
 
 def sanitize_filename_for_path(title):
     """
-    Sanitizes a string to be suitable for a filename in a path.
-    This function is less aggressive, retaining descriptive phrases like
-    '(Official Audio)' if they are part of the original title, as Snaptube
-    often includes them in the actual filename.
+    Sanitizes a string to be suitable for a filename in a path, mimicking Snaptube's behavior.
+    This function replaces specific problematic characters (like ', &) with underscores.
+    It retains descriptive phrases (e.g., '(Official Audio)') as they are part of Snaptube's filenames.
     """
+    sanitized = title
     # Replace common invalid characters with an underscore or remove them
-    sanitized = re.sub(r'[\\/:*?"<>|]', "_", title)
-    # Remove leading/trailing spaces
-    sanitized = sanitized.strip()
+    # Expanded to include ' and & based on user feedback
+    sanitized = re.sub(r'[\\/:*?"<>|\',&]', "_", sanitized)
+    # Replace multiple underscores with a single one
+    sanitized = re.sub(r"_+", "_", sanitized)
+    # Remove leading/trailing spaces or underscores
+    sanitized = sanitized.strip(" _")
     # Handle the leading underscore if present in the original title
     if title.startswith("_") and not sanitized.startswith("_"):
         sanitized = "_" + sanitized
@@ -72,40 +73,54 @@ def sanitize_filename_for_path(title):
 
 def clean_display_title(title):
     """
-    Cleans the title for display in the #EXTINF line, removing common
-    descriptive suffixes that are often part of YouTube titles but not
-    desired in the player's display name.
+    Cleans the title for display in the #EXTINF line.
+    It removes common YouTube-specific suffixes like (Official Video), [Lyrics], etc.,
+    but tries to be less aggressive if Musicolet's export shows it retaining parts
+    like '(Official Audio)' in the display title.
     """
-    # Regex to remove common suffixes like (Official Audio), (Lyric Video), etc.
-    # Flags: re.IGNORECASE for case-insensitive matching, re.UNICODE for broader character support
+    cleaned = title
+
+    # Remove common video/lyric/visualizer suffixes from the display title
+    # This regex is designed to remove these specific phrases from the end or middle
+    # of the title, often enclosed in parentheses or brackets.
     cleaned = re.sub(
-        r"\s*(\(|\[)(official\s+)?(audio|video|lyrics?|visualizer|music\s+video|hd|hq)(\)|\])\s*",
+        r"\s*(\(|\[)(official\s+)?(video|lyrics?|visualizer|music\s+video|hd|hq|from\s+f1\s*®\s*the\s+movie)(\)|\])\s*",
         "",
-        title,
+        cleaned,
         flags=re.IGNORECASE | re.UNICODE,
     )
-    # Remove any remaining leading/trailing spaces or hyphens
-    cleaned = cleaned.strip(" -")
+
+    # Remove common bitrate suffixes if they somehow made it into the YT title
+    cleaned = re.sub(
+        r"\s*\(mp3_\d+k\)\s*", "", cleaned, flags=re.IGNORECASE | re.UNICODE
+    )
+
+    # Clean up any remaining leading/trailing spaces or hyphens/underscores
+    cleaned = cleaned.strip(" -_")
+
     return cleaned
 
 
 def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
     """
     Generates an M3U playlist file based on YouTube video information.
-    It creates candidate paths focusing ONLY on Snaptube's MP3 (160K) naming.
+    It creates paths using the relative format and precise MP3 (160K) naming.
 
     Args:
         playlist_info (list): A list of dictionaries with 'title' and 'duration'.
         output_file (str): The name of the M3U file to create.
     """
-    # Base path on your Android phone where Musicolet will look for files
-    # This matches your Snaptube download location
-    BASE_ANDROID_PATH = "/storage/emulated/0/snaptube/download/SnapTube Audio/"
+    # Base path for your Snaptube downloads, RELATIVE to /storage/emulated/0/
+    # This is based on Musicolet's exported paths.
+    RELATIVE_ANDROID_BASE_PATH = "snaptube/download/SnapTube Audio/"
 
     m3u_content = ["#EXTM3U"]
 
     print(f"\nGenerating M3U file: {output_file}")
     print("Musicolet will try to match these paths on your phone.")
+    print(
+        f"IMPORTANT: Place '{output_file}' directly in '/storage/emulated/0/' on your phone."
+    )
 
     for video in playlist_info:
         yt_title_original = video["title"]
@@ -114,7 +129,7 @@ def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
         # 1. Clean title for display in #EXTINF line
         display_title = clean_display_title(yt_title_original)
 
-        # 2. Sanitize title for filename, keeping descriptive parts
+        # 2. Sanitize title for filename, keeping descriptive parts and fixing special chars
         filename_base = sanitize_filename_for_path(yt_title_original)
 
         # Generate ONLY the MP3 (160K) path as requested
@@ -123,8 +138,10 @@ def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
         # Add the EXTINF line with the cleaned display title
         m3u_content.append(f"#EXTINF:{duration},{display_title}")
 
-        # Ensure forward slashes for Android paths
-        full_android_path = os.path.join(BASE_ANDROID_PATH, filename).replace("\\", "/")
+        # Construct the full relative Android path
+        full_android_path = os.path.join(RELATIVE_ANDROID_BASE_PATH, filename).replace(
+            "\\", "/"
+        )
         m3u_content.append(full_android_path)
 
         # Add an empty line for better readability in the M3U file (optional)
@@ -136,7 +153,9 @@ def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
         print(
             f"Successfully created '{output_file}' with {len(playlist_info)} entries."
         )
-        print("Each song now has a single, precise MP3 (160K) candidate path.")
+        print(
+            "Each song now has a single, precise MP3 (160K) candidate path with relative addressing."
+        )
     except IOError as e:
         print(f"Error writing M3U file: {e}")
 
@@ -167,7 +186,7 @@ if __name__ == "__main__":
             print("\n--- M3U Generation Complete ---")
             print(f"1. Transfer '{output_m3u_filename}' to your Android phone.")
             print(
-                f"   A good location is inside '/storage/emulated/0/snaptube/download/SnapTube Audio/' or your phone's 'Playlists' folder."
+                f"   **IMPORTANT:** Place it directly in the root of your internal storage: `/storage/emulated/0/`"
             )
             print("2. Open Musicolet app on your phone.")
             print("3. Go to 'Playlists' section.")
