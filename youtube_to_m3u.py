@@ -24,7 +24,6 @@ def get_youtube_playlist_info(playlist_url):
             command, capture_output=True, text=True, check=True, encoding="utf-8"
         )
 
-        # yt-dlp prints each entry as a separate JSON object per line
         videos_info = []
         for line in process.stdout.strip().split("\n"):
             if line:
@@ -35,9 +34,7 @@ def get_youtube_playlist_info(playlist_url):
                     if title and duration is not None:
                         videos_info.append({"title": title, "duration": int(duration)})
                 except json.JSONDecodeError:
-                    print(
-                        f"Warning: Could not decode JSON line: {line[:100]}..."
-                    )  # Print first 100 chars
+                    print(f"Warning: Could not decode JSON line: {line[:100]}...")
         print(f"Successfully fetched information for {len(videos_info)} videos.")
         return videos_info
     except subprocess.CalledProcessError as e:
@@ -56,10 +53,12 @@ def get_youtube_playlist_info(playlist_url):
         return []
 
 
-def sanitize_filename(title):
+def sanitize_filename_for_path(title):
     """
-    Sanitizes a string to be suitable for a filename, removing invalid characters.
-    Also handles the leading underscore for some files.
+    Sanitizes a string to be suitable for a filename in a path.
+    This function is less aggressive, retaining descriptive phrases like
+    '(Official Audio)' if they are part of the original title, as Snaptube
+    often includes them in the actual filename.
     """
     # Replace common invalid characters with an underscore or remove them
     sanitized = re.sub(r'[\\/:*?"<>|]', "_", title)
@@ -71,16 +70,36 @@ def sanitize_filename(title):
     return sanitized
 
 
+def clean_display_title(title):
+    """
+    Cleans the title for display in the #EXTINF line, removing common
+    descriptive suffixes that are often part of YouTube titles but not
+    desired in the player's display name.
+    """
+    # Regex to remove common suffixes like (Official Audio), (Lyric Video), etc.
+    # Flags: re.IGNORECASE for case-insensitive matching, re.UNICODE for broader character support
+    cleaned = re.sub(
+        r"\s*(\(|\[)(official\s+)?(audio|video|lyrics?|visualizer|music\s+video|hd|hq)(\)|\])\s*",
+        "",
+        title,
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+    # Remove any remaining leading/trailing spaces or hyphens
+    cleaned = cleaned.strip(" -")
+    return cleaned
+
+
 def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
     """
     Generates an M3U playlist file based on YouTube video information.
-    It creates multiple candidate paths for each song to help Musicolet find the file.
+    It creates candidate paths focusing ONLY on Snaptube's MP3 (160K) naming.
 
     Args:
         playlist_info (list): A list of dictionaries with 'title' and 'duration'.
         output_file (str): The name of the M3U file to create.
     """
     # Base path on your Android phone where Musicolet will look for files
+    # This matches your Snaptube download location
     BASE_ANDROID_PATH = "/storage/emulated/0/snaptube/download/SnapTube Audio/"
 
     m3u_content = ["#EXTM3U"]
@@ -89,31 +108,24 @@ def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
     print("Musicolet will try to match these paths on your phone.")
 
     for video in playlist_info:
-        yt_title = video["title"]
+        yt_title_original = video["title"]
         duration = video["duration"]  # Duration in seconds
 
-        # Sanitize the title to create a potential filename
-        sanitized_yt_title = sanitize_filename(yt_title)
+        # 1. Clean title for display in #EXTINF line
+        display_title = clean_display_title(yt_title_original)
 
-        # Generate multiple candidate paths for Musicolet to try
-        # This covers the various naming conventions from Snaptube
-        candidate_filenames = [
-            f"{sanitized_yt_title}(MP3_160K).mp3",  # Example: Imagine Dragons - Follow You (Lyric Video)(MP3_160K).mp3
-            f"{sanitized_yt_title}.mp3",  # Example: Song Title.mp3 (if no bitrate suffix)
-            f"{sanitized_yt_title}(MP4_128K).m4a",  # Example: Song Title(MP4_128K).m4a
-            f"{sanitized_yt_title}.m4a",  # Example: Post Malone - Chemical (Official Lyric Video).m4a
-        ]
+        # 2. Sanitize title for filename, keeping descriptive parts
+        filename_base = sanitize_filename_for_path(yt_title_original)
 
-        # Add the EXTINF line once for the YouTube title
-        m3u_content.append(f"#EXTINF:{duration},{yt_title}")
+        # Generate ONLY the MP3 (160K) path as requested
+        filename = f"{filename_base}(MP3_160K).mp3"
 
-        # Add all candidate paths for this song
-        for filename in candidate_filenames:
-            # Ensure forward slashes for Android paths
-            full_android_path = os.path.join(BASE_ANDROID_PATH, filename).replace(
-                "\\", "/"
-            )
-            m3u_content.append(full_android_path)
+        # Add the EXTINF line with the cleaned display title
+        m3u_content.append(f"#EXTINF:{duration},{display_title}")
+
+        # Ensure forward slashes for Android paths
+        full_android_path = os.path.join(BASE_ANDROID_PATH, filename).replace("\\", "/")
+        m3u_content.append(full_android_path)
 
         # Add an empty line for better readability in the M3U file (optional)
         m3u_content.append("")
@@ -124,9 +136,7 @@ def generate_m3u_playlist(playlist_info, output_file="chill_playlist.m3u"):
         print(
             f"Successfully created '{output_file}' with {len(playlist_info)} entries."
         )
-        print(
-            "Each song has multiple candidate paths to increase Musicolet's matching success."
-        )
+        print("Each song now has a single, precise MP3 (160K) candidate path.")
     except IOError as e:
         print(f"Error writing M3U file: {e}")
 
